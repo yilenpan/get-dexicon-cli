@@ -13,8 +13,24 @@
 set -euo pipefail
 
 REPO="Dexicon-AI/get-dexicon-cli"
-INSTALL_DIR="${DEXICON_INSTALL_DIR:-/usr/local/bin}"
 BINARY_NAME="dexicon"
+TMP_DIR=""
+
+# Determine install directories based on write permissions
+if [ -w "/usr/local/lib" ] && [ -w "/usr/local/bin" ]; then
+    LIB_DIR="${DEXICON_LIB_DIR:-/usr/local/lib/dexicon-cli}"
+    BIN_DIR="${DEXICON_INSTALL_DIR:-/usr/local/bin}"
+else
+    LIB_DIR="${DEXICON_LIB_DIR:-$HOME/.local/lib/dexicon-cli}"
+    BIN_DIR="${DEXICON_INSTALL_DIR:-$HOME/.local/bin}"
+fi
+
+cleanup() {
+    if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
+        rm -rf "$TMP_DIR"
+    fi
+}
+trap cleanup EXIT
 
 # Colors for output
 RED='\033[0;31m'
@@ -74,7 +90,7 @@ get_latest_version() {
 
 # Download and install
 install() {
-    local os arch version binary_name download_url tmp_dir
+    local os arch version archive_name download_url
 
     os=$(detect_os)
     arch=$(detect_arch)
@@ -87,48 +103,62 @@ install() {
     # Get version
     if [ -n "${DEXICON_VERSION:-}" ]; then
         version="$DEXICON_VERSION"
-        info "Installing Dexicon CLI $version..."
     else
         info "Fetching latest version..."
         version=$(get_latest_version)
-        info "Installing Dexicon CLI $version..."
     fi
+    info "Installing Dexicon CLI $version..."
 
-    binary_name="dexicon-cli-${os}-${arch}"
-    download_url="https://github.com/${REPO}/releases/download/${version}/${binary_name}"
+    archive_name="dexicon-cli-${os}-${arch}.tar.gz"
+    download_url="https://github.com/${REPO}/releases/download/${version}/${archive_name}"
 
     info "Detected: $os/$arch"
     info "Downloading from: $download_url"
 
     # Create temp directory
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' EXIT
+    TMP_DIR=$(mktemp -d)
 
-    # Download binary
-    if ! curl -sSL --fail -o "${tmp_dir}/${BINARY_NAME}" "$download_url"; then
-        error "Failed to download binary. Please check if version '$version' exists."
+    # Download archive
+    if ! curl -sSL --fail -o "${TMP_DIR}/${archive_name}" "$download_url"; then
+        error "Failed to download archive. Please check if version '$version' exists."
+    fi
+
+    # Extract archive
+    info "Extracting archive..."
+    tar -xzf "${TMP_DIR}/${archive_name}" -C "${TMP_DIR}"
+
+    # Verify extraction
+    if [ ! -f "${TMP_DIR}/dexicon-cli/${BINARY_NAME}" ]; then
+        error "Failed to extract binary. Archive may be corrupted."
     fi
 
     # Make executable
-    chmod +x "${tmp_dir}/${BINARY_NAME}"
+    chmod +x "${TMP_DIR}/dexicon-cli/${BINARY_NAME}"
 
-    # Install to target directory
-    info "Installing to ${INSTALL_DIR}/${BINARY_NAME}..."
+    # Create directories if needed
+    mkdir -p "$(dirname "$LIB_DIR")" "$BIN_DIR"
 
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
-        # Remove macOS quarantine attribute
-        if [ "$(uname -s)" = "Darwin" ]; then
-            xattr -d com.apple.quarantine "${INSTALL_DIR}/${BINARY_NAME}" 2>/dev/null || true
-        fi
-    else
-        info "Requesting sudo access to install to $INSTALL_DIR..."
-        sudo mv "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
-        # Remove macOS quarantine attribute (needs sudo)
-        if [ "$(uname -s)" = "Darwin" ]; then
-            sudo xattr -d com.apple.quarantine "${INSTALL_DIR}/${BINARY_NAME}" 2>/dev/null || true
-        fi
+    # Remove existing installation
+    if [ -d "$LIB_DIR" ]; then
+        info "Removing existing installation..."
+        rm -rf "$LIB_DIR"
     fi
+    if [ -L "${BIN_DIR}/${BINARY_NAME}" ]; then
+        rm -f "${BIN_DIR}/${BINARY_NAME}"
+    fi
+
+    # Install the full dexicon-cli directory
+    info "Installing to ${LIB_DIR}..."
+    mv "${TMP_DIR}/dexicon-cli" "$LIB_DIR"
+
+    # Remove macOS quarantine attribute
+    if [ "$os" = "darwin" ]; then
+        xattr -dr com.apple.quarantine "$LIB_DIR" 2>/dev/null || true
+    fi
+
+    # Create symlink in bin directory
+    info "Creating symlink in ${BIN_DIR}..."
+    ln -sf "${LIB_DIR}/${BINARY_NAME}" "${BIN_DIR}/${BINARY_NAME}"
 
     # Verify installation
     if command -v "$BINARY_NAME" &> /dev/null; then
@@ -139,8 +169,8 @@ install() {
         success "Get started with: dexicon init"
     else
         warn "Installation complete, but '${BINARY_NAME}' is not in your PATH."
-        echo "Add ${INSTALL_DIR} to your PATH, or run:"
-        echo "  ${INSTALL_DIR}/${BINARY_NAME} --version"
+        echo "Add ${BIN_DIR} to your PATH, or run:"
+        echo "  ${BIN_DIR}/${BINARY_NAME} --version"
     fi
 }
 
