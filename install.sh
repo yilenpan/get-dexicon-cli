@@ -7,14 +7,48 @@
 #
 # Environment variables:
 #   DEXICON_VERSION - Install a specific version (e.g., "v0.2.1"). Default: latest
-#   DEXICON_INSTALL_DIR - Installation directory. Default: /usr/local/bin
+#   DEXICON_INSTALL_DIR - Directory for symlink (BIN_DIR). Default: /usr/local/bin or ~/.local/bin
+#   DEXICON_LIB_DIR - Directory for binary (LIB_DIR). Default: /usr/local/lib or ~/.local/lib
 #
 
 set -euo pipefail
 
 REPO="Dexicon-AI/get-dexicon-cli"
-INSTALL_DIR="${DEXICON_INSTALL_DIR:-/usr/local/bin}"
 BINARY_NAME="dexicon"
+
+# Determine if a path is writable or can be created
+# Returns 0 if path is writable, or if path doesn't exist but its parent is writable
+is_path_usable() {
+    local path="$1"
+    if [ -d "$path" ] && [ -w "$path" ]; then
+        return 0
+    elif [ ! -e "$path" ]; then
+        local parent
+        parent="$(dirname "$path")"
+        if [ -d "$parent" ] && [ -w "$parent" ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Set LIB_DIR: where the binary will be installed
+if [ -n "${DEXICON_LIB_DIR:-}" ]; then
+    LIB_DIR="$DEXICON_LIB_DIR"
+elif is_path_usable "/usr/local/lib"; then
+    LIB_DIR="/usr/local/lib"
+else
+    LIB_DIR="${HOME}/.local/lib"
+fi
+
+# Set BIN_DIR: where the symlink will be created
+if [ -n "${DEXICON_INSTALL_DIR:-}" ]; then
+    BIN_DIR="$DEXICON_INSTALL_DIR"
+elif is_path_usable "/usr/local/bin"; then
+    BIN_DIR="/usr/local/bin"
+else
+    BIN_DIR="${HOME}/.local/bin"
+fi
 
 # Colors for output
 RED='\033[0;31m'
@@ -112,22 +146,62 @@ install() {
     # Make executable
     chmod +x "${tmp_dir}/${BINARY_NAME}"
 
-    # Install to target directory
-    info "Installing to ${INSTALL_DIR}/${BINARY_NAME}..."
+    # Install binary to LIB_DIR
+    info "Installing binary to ${LIB_DIR}/${BINARY_NAME}..."
 
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+    # Create LIB_DIR if it doesn't exist
+    if [ ! -d "$LIB_DIR" ]; then
+        if [ -w "$(dirname "$LIB_DIR")" ]; then
+            mkdir -p "$LIB_DIR"
+        else
+            info "Requesting sudo access to create $LIB_DIR..."
+            sudo mkdir -p "$LIB_DIR"
+        fi
+    fi
+
+    if [ -w "$LIB_DIR" ]; then
+        mv "${tmp_dir}/${BINARY_NAME}" "${LIB_DIR}/${BINARY_NAME}"
         # Remove macOS quarantine attribute
         if [ "$(uname -s)" = "Darwin" ]; then
-            xattr -d com.apple.quarantine "${INSTALL_DIR}/${BINARY_NAME}" 2>/dev/null || true
+            xattr -d com.apple.quarantine "${LIB_DIR}/${BINARY_NAME}" 2>/dev/null || true
         fi
     else
-        info "Requesting sudo access to install to $INSTALL_DIR..."
-        sudo mv "${tmp_dir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+        info "Requesting sudo access to install to $LIB_DIR..."
+        sudo mv "${tmp_dir}/${BINARY_NAME}" "${LIB_DIR}/${BINARY_NAME}"
         # Remove macOS quarantine attribute (needs sudo)
         if [ "$(uname -s)" = "Darwin" ]; then
-            sudo xattr -d com.apple.quarantine "${INSTALL_DIR}/${BINARY_NAME}" 2>/dev/null || true
+            sudo xattr -d com.apple.quarantine "${LIB_DIR}/${BINARY_NAME}" 2>/dev/null || true
         fi
+    fi
+
+    # Create symlink in BIN_DIR
+    info "Creating symlink in ${BIN_DIR}/${BINARY_NAME}..."
+
+    # Create BIN_DIR if it doesn't exist
+    if [ ! -d "$BIN_DIR" ]; then
+        if [ -w "$(dirname "$BIN_DIR")" ]; then
+            mkdir -p "$BIN_DIR"
+        else
+            info "Requesting sudo access to create $BIN_DIR..."
+            sudo mkdir -p "$BIN_DIR"
+        fi
+    fi
+
+    # Remove any existing file or symlink at the target path
+    if [ -e "${BIN_DIR}/${BINARY_NAME}" ] || [ -L "${BIN_DIR}/${BINARY_NAME}" ]; then
+        if [ -w "$BIN_DIR" ]; then
+            rm -f "${BIN_DIR}/${BINARY_NAME}"
+        else
+            sudo rm -f "${BIN_DIR}/${BINARY_NAME}"
+        fi
+    fi
+
+    # Create the symlink
+    if [ -w "$BIN_DIR" ]; then
+        ln -sf "${LIB_DIR}/${BINARY_NAME}" "${BIN_DIR}/${BINARY_NAME}"
+    else
+        info "Requesting sudo access to create symlink in $BIN_DIR..."
+        sudo ln -sf "${LIB_DIR}/${BINARY_NAME}" "${BIN_DIR}/${BINARY_NAME}"
     fi
 
     # Verify installation
@@ -139,8 +213,8 @@ install() {
         success "Get started with: dexicon init"
     else
         warn "Installation complete, but '${BINARY_NAME}' is not in your PATH."
-        echo "Add ${INSTALL_DIR} to your PATH, or run:"
-        echo "  ${INSTALL_DIR}/${BINARY_NAME} --version"
+        echo "Add ${BIN_DIR} to your PATH, or run:"
+        echo "  ${BIN_DIR}/${BINARY_NAME} --version"
     fi
 }
 
